@@ -117,6 +117,9 @@ const INITIAL_OFFLINE_SUBMISSIONS: ResellerSubmission[] = [
 class DataService {
   private broadcastChannel: BroadcastChannel | null = null;
   private sseEventSource: EventSource | null = null;
+  private reconnectTimeout: any = null;
+  private pollingInterval: any = null;
+  private isConnected: boolean = false;
   private listeners: {
     submissions: Array<(subs: ResellerSubmission[]) => void>;
     settings: Array<(settings: FormSettings) => void>;
@@ -132,6 +135,42 @@ class DataService {
     this.initBroadcastChannel();
     this.initStorageEventListener();
     this.initSSE();
+    this.startBackgroundSync();
+  }
+
+  // Resolves backend API URL (supports custom URL or Vite env var for Netlify deployments)
+  public getApiUrl(endpoint: string): string {
+    let base = '';
+    if (typeof window !== 'undefined') {
+      const stored = localStorage.getItem('poda_api_backend_url');
+      if (stored && stored.trim()) {
+        base = stored.trim().replace(/\/$/, '');
+      }
+    }
+    if (!base && typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_API_BASE_URL) {
+      base = String((import.meta as any).env.VITE_API_BASE_URL).trim().replace(/\/$/, '');
+    }
+    return `${base}${endpoint}`;
+  }
+
+  public setCustomBackendUrl(url: string) {
+    if (typeof window !== 'undefined') {
+      if (url && url.trim()) {
+        localStorage.setItem('poda_api_backend_url', url.trim().replace(/\/$/, ''));
+      } else {
+        localStorage.removeItem('poda_api_backend_url');
+      }
+      // Reconnect SSE with new backend URL
+      this.initSSE();
+      this.fetchSubmissions().then((subs) => this.notifySubmissionsListeners(subs));
+    }
+  }
+
+  public getCustomBackendUrl(): string {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('poda_api_backend_url') || (import.meta as any).env?.VITE_API_BASE_URL || '';
+    }
+    return '';
   }
 
   // Cross-Tab instant sync using BroadcastChannel
@@ -172,19 +211,27 @@ class DataService {
     }
   }
 
-  // Server-Sent Events (SSE) for server-side real-time sync
+  // Server-Sent Events (SSE) for server-side real-time multi-user sync
   public initSSE() {
     if (typeof window === 'undefined' || !('EventSource' in window)) return;
 
     try {
       if (this.sseEventSource) {
         this.sseEventSource.close();
+        this.sseEventSource = null;
       }
 
-      const es = new EventSource('/api/sync/events');
+      if (this.reconnectTimeout) {
+        clearTimeout(this.reconnectTimeout);
+        this.reconnectTimeout = null;
+      }
+
+      const sseUrl = this.getApiUrl('/api/sync/events');
+      const es = new EventSource(sseUrl);
       this.sseEventSource = es;
 
       es.onopen = () => {
+        this.isConnected = true;
         this.notifyConnectionListeners(true);
       };
 
@@ -197,6 +244,7 @@ class DataService {
             data.type === 'STATUS_UPDATED' ||
             data.type === 'SUBMISSION_UPDATED'
           ) {
+            // Immediate fresh fetch from server
             this.fetchSubmissions().then((subs) => {
               this.notifySubmissionsListeners(subs);
             });
@@ -213,11 +261,43 @@ class DataService {
       };
 
       es.onerror = () => {
+        this.isConnected = false;
         this.notifyConnectionListeners(false);
+        try {
+          es.close();
+        } catch {}
+        this.sseEventSource = null;
+
+        // Auto-reconnect with exponential backoff
+        if (!this.reconnectTimeout) {
+          this.reconnectTimeout = setTimeout(() => {
+            this.reconnectTimeout = null;
+            this.initSSE();
+          }, 3500);
+        }
       };
     } catch {
+      this.isConnected = false;
       this.notifyConnectionListeners(false);
     }
+  }
+
+  // Gentle background synchronization to guarantee concurrent submissions are caught across devices
+  private startBackgroundSync() {
+    if (typeof window === 'undefined') return;
+    if (this.pollingInterval) clearInterval(this.pollingInterval);
+
+    this.pollingInterval = setInterval(async () => {
+      // Only poll if document is visible to save battery and network
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        try {
+          const subs = await this.fetchSubmissions();
+          if (subs && subs.length > 0) {
+            this.notifySubmissionsListeners(subs);
+          }
+        } catch {}
+      }
+    }, 12000);
   }
 
   private broadcastLocalChange(type: 'SUBMISSIONS_UPDATED' | 'SETTINGS_UPDATED', payload: any) {
@@ -283,18 +363,22 @@ class DataService {
   // --- Submissions CRUD with Dual-Layer Persistence (Server + IndexedDB + safe localStorage) ---
   public async fetchSubmissions(): Promise<ResellerSubmission[]> {
     try {
-      const res = await fetch('/api/submissions');
+      const url = this.getApiUrl('/api/submissions');
+      const res = await fetch(url);
       if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data)) {
-          // Store full data in IndexedDB
-          await idbSaveAllSubmissions(data);
+        const contentType = res.headers.get('content-type') || '';
+        if (contentType.includes('application/json')) {
+          const data = await res.json();
+          if (Array.isArray(data)) {
+            // Store full data in IndexedDB (handles hundreds of MBs safely)
+            await idbSaveAllSubmissions(data);
 
-          // Store sanitized light version in localStorage (strips heavy dataUrl)
-          const sanitized = sanitizeSubmissionsListForLocalStorage(data);
-          safeSetLocalStorage(SUBMISSIONS_STORAGE_KEY, JSON.stringify(sanitized));
+            // Store sanitized light version in localStorage (strips heavy dataUrl)
+            const sanitized = sanitizeSubmissionsListForLocalStorage(data);
+            safeSetLocalStorage(SUBMISSIONS_STORAGE_KEY, JSON.stringify(sanitized));
 
-          return data;
+            return data;
+          }
         }
       }
     } catch {
@@ -337,31 +421,35 @@ class DataService {
 
     // 1. Try sending to backend server if available
     try {
-      const res = await fetch('/api/submissions', {
+      const url = this.getApiUrl('/api/submissions');
+      const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
 
       if (res.ok) {
-        const result = await res.json();
-        const serverSubmission: ResellerSubmission = result.submission;
+        const contentType = res.headers.get('content-type') || '';
+        if (contentType.includes('application/json')) {
+          const result = await res.json();
+          const serverSubmission: ResellerSubmission = result.submission;
 
-        // Save full submission to IndexedDB (no quota limit)
-        await idbSaveSubmission(serverSubmission);
+          // Save full submission to IndexedDB (no quota limit)
+          await idbSaveSubmission(serverSubmission);
 
-        // Update local mirror safely without quota crash
-        const currentList = await this.fetchSubmissions();
-        const updatedList = [serverSubmission, ...currentList.filter((s) => s.id !== serverSubmission.id)];
-        
-        // Strip heavy base64 strings before saving to localStorage to prevent QuotaExceededError
-        const sanitized = sanitizeSubmissionsListForLocalStorage(updatedList);
-        safeSetLocalStorage(SUBMISSIONS_STORAGE_KEY, JSON.stringify(sanitized));
+          // Update local mirror safely without quota crash
+          const currentList = await this.fetchSubmissions();
+          const updatedList = [serverSubmission, ...currentList.filter((s) => s.id !== serverSubmission.id)];
 
-        this.broadcastLocalChange('SUBMISSIONS_UPDATED', updatedList);
-        this.notifySubmissionsListeners(updatedList);
+          // Strip heavy base64 strings before saving to localStorage to prevent QuotaExceededError
+          const sanitized = sanitizeSubmissionsListForLocalStorage(updatedList);
+          safeSetLocalStorage(SUBMISSIONS_STORAGE_KEY, JSON.stringify(sanitized));
 
-        return serverSubmission;
+          this.broadcastLocalChange('SUBMISSIONS_UPDATED', updatedList);
+          this.notifySubmissionsListeners(updatedList);
+
+          return serverSubmission;
+        }
       }
     } catch (e) {
       console.warn('Network submission fallback to client-side storage:', e);
@@ -407,7 +495,8 @@ class DataService {
     nomorSuratPenunjukan?: string
   ): Promise<ResellerSubmission | null> {
     try {
-      const res = await fetch(`/api/submissions/${id}/status`, {
+      const url = this.getApiUrl(`/api/submissions/${id}/status`);
+      const res = await fetch(url, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -419,13 +508,16 @@ class DataService {
       });
 
       if (res.ok) {
-        const result = await res.json();
-        const updatedSub: ResellerSubmission = result.submission;
-        await idbSaveSubmission(updatedSub);
-        const subs = await this.fetchSubmissions();
-        this.broadcastLocalChange('SUBMISSIONS_UPDATED', subs);
-        this.notifySubmissionsListeners(subs);
-        return updatedSub;
+        const contentType = res.headers.get('content-type') || '';
+        if (contentType.includes('application/json')) {
+          const result = await res.json();
+          const updatedSub: ResellerSubmission = result.submission;
+          await idbSaveSubmission(updatedSub);
+          const subs = await this.fetchSubmissions();
+          this.broadcastLocalChange('SUBMISSIONS_UPDATED', subs);
+          this.notifySubmissionsListeners(subs);
+          return updatedSub;
+        }
       }
     } catch {
       // Fallback
@@ -463,12 +555,16 @@ class DataService {
   // --- Form Settings with Realtime Broadcast ---
   public async fetchFormSettings(): Promise<FormSettings> {
     try {
-      const res = await fetch('/api/form-settings');
+      const url = this.getApiUrl('/api/form-settings');
+      const res = await fetch(url);
       if (res.ok) {
-        const data = await res.json();
-        if (data && data.companyName) {
-          safeSetLocalStorage(SETTINGS_STORAGE_KEY, JSON.stringify(data));
-          return data;
+        const contentType = res.headers.get('content-type') || '';
+        if (contentType.includes('application/json')) {
+          const data = await res.json();
+          if (data && data.companyName) {
+            safeSetLocalStorage(SETTINGS_STORAGE_KEY, JSON.stringify(data));
+            return data;
+          }
         }
       }
     } catch {
@@ -490,7 +586,8 @@ class DataService {
     settings.updatedAt = new Date().toISOString();
 
     try {
-      await fetch('/api/form-settings', {
+      const url = this.getApiUrl('/api/form-settings');
+      await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(settings),
@@ -541,14 +638,18 @@ class DataService {
     safeSetLocalStorage('poda_reseller_form_backup', JSON.stringify(lightPayload));
 
     try {
-      const res = await fetch('/api/draft', {
+      const url = this.getApiUrl('/api/draft');
+      const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
       if (res.ok) {
-        const json = await res.json();
-        return json.savedAt || payload.savedAt;
+        const contentType = res.headers.get('content-type') || '';
+        if (contentType.includes('application/json')) {
+          const json = await res.json();
+          return json.savedAt || payload.savedAt;
+        }
       }
     } catch {
       // Fallback

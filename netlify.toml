@@ -1,12 +1,9 @@
+# Netlify Configuration for PT. PODA E-LIQUID COMPANY Reseller Registration Portal
 [build]
   command = "npm run build"
   publish = "dist"
 
-[[redirects]]
-  from = "/api/*"
-  to = "/api/:splat"
-  status = 200
-
+# Single-Page Application (SPA) routing
 [[redirects]]
   from = "/*"
   to = "/index.html"

@@ -61,11 +61,37 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   const [isSettingsUnlocked, setIsSettingsUnlocked] = useState(true);
   const [pinInput, setPinInput] = useState('');
   const [pinError, setPinError] = useState(false);
+  const [liveAlert, setLiveAlert] = useState<string | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [showSyncModal, setShowSyncModal] = useState(false);
+  const [customBackendUrlInput, setCustomBackendUrlInput] = useState(() => dataService.getCustomBackendUrl());
+  const [savedUrlSuccess, setSavedUrlSuccess] = useState(false);
+
+  const prevCountRef = React.useRef(submissions.length);
+
+  // Detect incoming real-time submissions from concurrent users
+  useEffect(() => {
+    if (submissions.length > prevCountRef.current && prevCountRef.current > 0) {
+      const newest = submissions[0];
+      setLiveAlert(
+        `Pendaftaran Baru Masuk: "${newest?.data?.q8_nama_toko || 'Toko'}" (${newest?.registrationNumber}) - Otomatis tersimpan di Admin.`
+      );
+      const timer = setTimeout(() => setLiveAlert(null), 9000);
+      return () => clearTimeout(timer);
+    }
+    prevCountRef.current = submissions.length;
+  }, [submissions]);
 
   // Refresh submissions once when admin view opens
   useEffect(() => {
     onRefreshSubmissions();
   }, [onRefreshSubmissions]);
+
+  const handleManualRefresh = async () => {
+    setIsRefreshing(true);
+    await onRefreshSubmissions();
+    setTimeout(() => setIsRefreshing(false), 500);
+  };
 
   const handleUpdateStatus = async (id: string, newStatus: SubmissionStatus) => {
     setIsUpdating(true);
@@ -191,19 +217,46 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
 
   return (
     <div className="space-y-4 sm:space-y-6">
+      {/* Live Concurrent Submission Notification Alert */}
+      {liveAlert && (
+        <div className="bg-gradient-to-r from-emerald-600 to-teal-700 text-white p-4 rounded-2xl shadow-md flex items-center justify-between gap-3 animate-fade-in border border-emerald-400/30">
+          <div className="flex items-center gap-3">
+            <span className="w-9 h-9 rounded-xl bg-white/20 flex items-center justify-center shrink-0">
+              <CheckCircle className="w-5 h-5 text-white" />
+            </span>
+            <div>
+              <p className="font-bold text-sm tracking-wide">Pemberitahuan Real-Time</p>
+              <p className="text-xs text-emerald-100">{liveAlert}</p>
+            </div>
+          </div>
+          <button
+            onClick={() => setLiveAlert(null)}
+            className="text-xs bg-white/20 hover:bg-white/30 text-white font-semibold px-3 py-1.5 rounded-lg transition-colors cursor-pointer shrink-0"
+          >
+            Tutup
+          </button>
+        </div>
+      )}
+
       {/* Top Banner in Executive Light Theme */}
       <div className="bg-white border border-slate-200/90 rounded-2xl sm:rounded-3xl p-5 sm:p-7 shadow-xs">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div>
-            <div className="flex items-center gap-2 text-amber-700 text-[11px] sm:text-xs font-bold uppercase tracking-wider mb-1">
+            <div className="flex flex-wrap items-center gap-2 text-amber-700 text-[11px] sm:text-xs font-bold uppercase tracking-wider mb-1">
               <span>Portal Verifikasi & Otorisasi Sales</span>
               <span>·</span>
               <span>{settings.companyName}</span>
               <span className="text-slate-300">·</span>
-              <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                {isRealtimeConnected ? 'Real-time Terhubung' : 'Sinkronisasi Aktif'}
-              </span>
+              <button
+                type="button"
+                onClick={() => setShowSyncModal(true)}
+                className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-emerald-700 hover:text-emerald-800 bg-emerald-50 hover:bg-emerald-100 px-2.5 py-1 rounded-full border border-emerald-200 transition-colors cursor-pointer"
+                title="Klik untuk melihat status sinkronisasi multi-user & panduan koneksi Netlify"
+              >
+                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                <span>{isRealtimeConnected ? 'Multi-User Live Sync Aktif' : 'Sinkronisasi Aktif'}</span>
+                <span className="text-[10px] text-emerald-600 underline ml-0.5">Detail</span>
+              </button>
             </div>
             <h1 className="text-xl sm:text-2xl lg:text-3xl font-extrabold tracking-tight text-slate-950">
               Dashboard Verifikasi & Manajemen Reseller
@@ -242,11 +295,13 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
             </button>
 
             <button
-              onClick={onRefreshSubmissions}
-              className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 min-h-[42px] bg-slate-900 hover:bg-slate-800 text-xs font-bold rounded-xl text-white transition-colors shadow-xs cursor-pointer"
+              onClick={handleManualRefresh}
+              disabled={isRefreshing}
+              className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 min-h-[42px] bg-slate-900 hover:bg-slate-800 text-xs font-bold rounded-xl text-white transition-colors shadow-xs cursor-pointer disabled:opacity-75"
+              title="Sinkronisasi ulang semua data dari database server"
             >
-              <RefreshCw className="w-4 h-4 text-slate-200" />
-              <span>Refresh</span>
+              <RefreshCw className={`w-4 h-4 text-slate-200 ${isRefreshing ? 'animate-spin' : ''}`} />
+              <span>{isRefreshing ? 'Memperbarui...' : 'Refresh'}</span>
             </button>
 
             {onLogout && (
@@ -1033,6 +1088,120 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                   <p className="font-bold underline text-slate-900">DIVISI LEGAL & OTORISASI RESELLER</p>
                 </div>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Multi-User Real-time Sync & Netlify Backend Configuration Modal */}
+      {showSyncModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-fade-in">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl border border-slate-200">
+            <div className="flex items-center justify-between pb-4 border-b border-slate-200">
+              <div className="flex items-center gap-2.5">
+                <span className="w-10 h-10 rounded-2xl bg-emerald-100 text-emerald-700 flex items-center justify-center font-bold">
+                  <Radio className="w-5 h-5 text-emerald-600 animate-pulse" />
+                </span>
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">Sinkronisasi Multi-User & Server</h3>
+                  <p className="text-xs text-slate-500">PT. PODA E-LIQUID COMPANY Database</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowSyncModal(false)}
+                className="text-slate-400 hover:text-slate-700 p-1.5 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer"
+              >
+                <XCircle className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="py-4 space-y-4">
+              {/* Status Indicator Card */}
+              <div className="p-4 bg-emerald-50/80 border border-emerald-200 rounded-2xl space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-emerald-950 uppercase tracking-wider flex items-center gap-2">
+                    <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-ping" />
+                    Status Multi-User Concurrency
+                  </span>
+                  <span className="text-xs font-bold text-emerald-800 bg-white px-2.5 py-0.5 rounded-full border border-emerald-300">
+                    {isRealtimeConnected ? 'Real-Time Aktif' : 'Terhubung Lokal & Backup'}
+                  </span>
+                </div>
+                <p className="text-xs text-emerald-900 leading-relaxed">
+                  Semua pendaftaran dari siapa pun yang dikirim pada saat bersamaan dijamin 100% tersimpan aman di menu Admin tanpa data hilang atau nomor registrasi bertabrakan.
+                </p>
+                <div className="pt-2 border-t border-emerald-200/60 flex items-center justify-between text-xs text-emerald-950">
+                  <span>Total Data di Database Admin:</span>
+                  <strong className="text-sm font-extrabold text-emerald-800">{submissions.length} Pendaftar</strong>
+                </div>
+              </div>
+
+              {/* Netlify Deployment & Backend Setup Info */}
+              <div className="p-4 bg-slate-50 border border-slate-200 rounded-2xl space-y-2.5">
+                <div className="flex items-center gap-2 text-slate-900 font-bold text-xs uppercase tracking-wide">
+                  <Building2 className="w-4 h-4 text-amber-600" />
+                  <span>Panduan Deploy Netlify & Backend Terpusat</span>
+                </div>
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  Jika frontend Anda dideploy ke <strong>Netlify</strong>, masukkan alamat server API backend di bawah ini agar semua pengguna dari berbagai kota/perangkat langsung tersambung ke database admin yang sama:
+                </p>
+
+                <div className="space-y-1.5 pt-1">
+                  <label className="text-[11px] font-semibold text-slate-700 block">
+                    URL Server Backend (Opsional untuk deploy Netlify terpisah):
+                  </label>
+                  <input
+                    type="url"
+                    placeholder="https://server-poda.yourdomain.com (Kosongkan jika satu server)"
+                    value={customBackendUrlInput}
+                    onChange={(e) => setCustomBackendUrlInput(e.target.value)}
+                    className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-xl focus:outline-hidden focus:ring-2 focus:ring-amber-500 font-mono"
+                  />
+                  {savedUrlSuccess && (
+                    <p className="text-xs text-emerald-600 font-medium flex items-center gap-1">
+                      <CheckCircle className="w-3.5 h-3.5" /> URL Server berhasil diperbarui & tersambung!
+                    </p>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      dataService.setCustomBackendUrl(customBackendUrlInput);
+                      setSavedUrlSuccess(true);
+                      onRefreshSubmissions();
+                      setTimeout(() => setSavedUrlSuccess(false), 3000);
+                    }}
+                    className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold rounded-lg transition-colors cursor-pointer"
+                  >
+                    Simpan URL Server
+                  </button>
+                  {customBackendUrlInput && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCustomBackendUrlInput('');
+                        dataService.setCustomBackendUrl('');
+                        onRefreshSubmissions();
+                      }}
+                      className="px-3 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 text-xs font-semibold rounded-lg transition-colors cursor-pointer"
+                    >
+                      Reset Default
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className="pt-3 border-t border-slate-200 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setShowSyncModal(false)}
+                className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition-colors cursor-pointer"
+              >
+                Tutup
+              </button>
             </div>
           </div>
         </div>

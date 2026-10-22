@@ -77,20 +77,24 @@ export function cleanBloatedLocalStorage(): void {
   if (typeof window === 'undefined') return;
   try {
     const raw = localStorage.getItem('poda_reseller_submissions_db');
-    if (raw && (raw.includes('data:image/') || raw.length > 100000)) {
-      try {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) {
-          const sanitized = sanitizeSubmissionsListForLocalStorage(parsed);
-          localStorage.setItem('poda_reseller_submissions_db', JSON.stringify(sanitized));
-          console.log('[Storage] Cleaned and sanitized bloated localStorage submissions.');
-          return;
-        }
-      } catch {}
-      localStorage.removeItem('poda_reseller_submissions_db');
+    if (raw) {
+      if (raw.includes('data:image/') || raw.length > 50000) {
+        try {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) {
+            const sanitized = sanitizeSubmissionsListForLocalStorage(parsed);
+            safeSetLocalStorage('poda_reseller_submissions_db', JSON.stringify(sanitized));
+            console.log('[Storage] Cleaned and sanitized bloated localStorage submissions.');
+            return;
+          }
+        } catch {}
+        try {
+          localStorage.removeItem('poda_reseller_submissions_db');
+        } catch {}
+      }
     }
   } catch (e) {
-    console.warn('[Storage] Clean bloated localStorage failed, resetting key:', e);
+    console.warn('[Storage] Clean bloated localStorage failed, resetting key safely:', e);
     try {
       localStorage.removeItem('poda_reseller_submissions_db');
     } catch {}
