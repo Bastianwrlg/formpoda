@@ -1,0 +1,6 @@
+{
+  "name": "Pendaftaran Reseller PT. PODA E-LIQUID COMPANY",
+  "description": "Aplikasi formulir pendaftaran dan verifikasi reseller resmi PT. PODA E-LIQUID COMPANY dengan validasi input berjenjang dan penyimpanan database otomatis.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
